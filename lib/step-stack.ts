@@ -9,117 +9,145 @@ import { Construct } from "constructs";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
 
 export class StepStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const receiverLambda = new NodejsFunction(this, "receiver-lambda", {
-      entry: "./lambdas/receiver.ts",
-      runtime: lambda.Runtime.NODEJS_12_X,
-      timeout: cdk.Duration.seconds(3),
+    const stubAPI = new apigw.RestApi(this, "atg-stub-apigw", {
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigw.Cors.ALL_ORIGINS,
+        allowMethods: apigw.Cors.ALL_METHODS,
+        allowHeaders: ["*"],
+        allowCredentials: true,
+      },
     });
-    const deadLetterQueue = new sqs.Queue(
-      this,
-      "dead-letter-queue"
-      // {
-      //   retentionPeriod: cdk.Duration.minutes(30),
-      // }
+
+    stubAPI.root.addResource("atg").addMethod(
+      "POST",
+      new apigw.MockIntegration({
+        integrationResponses: [
+          {
+            statusCode: "200",
+          },
+        ],
+        passthroughBehavior: apigw.PassthroughBehavior.NEVER,
+        requestTemplates: {
+          "application/json": '{ "statusCode": 200 }',
+        },
+      }),
+      {
+        methodResponses: [{ statusCode: "200" }],
+      }
     );
 
+    const deadLetterQueue = new sqs.Queue(this, "dead-letter-queue", {
+      retentionPeriod: cdk.Duration.days(14),
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const queue = new sqs.Queue(this, "receiver-queue", {
+      retentionPeriod: cdk.Duration.days(5),
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      deliveryDelay: cdk.Duration.seconds(3),
+      visibilityTimeout: cdk.Duration.minutes(100),
       deadLetterQueue: {
         queue: deadLetterQueue,
         maxReceiveCount: 1,
       },
     });
 
-    const getStatusLambda = new NodejsFunction(this, "get-status-lambda", {
-      entry: "./lambdas/get-status.ts",
-      runtime: lambda.Runtime.NODEJS_12_X,
-      timeout: cdk.Duration.seconds(3),
-    });
+    const notifyStatusLambda = new NodejsFunction(
+      this,
+      "notify-status-lambda",
+      {
+        entry: "./lambdas/notify-status.ts",
+        runtime: lambda.Runtime.NODEJS_12_X,
+        timeout: cdk.Duration.seconds(3),
+        environment: {
+          ATG_ENDPOINT: stubAPI.url,
+        },
+      }
+    );
 
-    const loggerLambda = new NodejsFunction(this, "logger-lambda", {
-      entry: "./lambdas/logger.ts",
-      runtime: lambda.Runtime.NODEJS_14_X,
-      timeout: cdk.Duration.seconds(3),
-    });
-    // new tasks.EmrCreateCluster(this, "Create Cluster", {
-    //   instances: {},
-    //   name: sfn.TaskInput.fromJsonPathAt("$.ClusterName").value,
-    //   stepConcurrencyLevel: 10,
+    notifyStatusLambda.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["states:SendTaskSuccess", "states:SendTaskFailure"],
+        resources: ["*"],
+        effect: Effect.ALLOW,
+      })
+    );
+
+    // const jobFailed = new sfn.Fail(this, "Job Failed", {
+    //   cause: "AWS Batch Job Failed",
+    //   error: "DescribeJob returned FAILED",
     // });
 
-    const processorLambda = new NodejsFunction(this, "processor-lambda", {
-      entry: "./lambdas/processor.ts",
-      runtime: lambda.Runtime.NODEJS_12_X,
-      timeout: cdk.Duration.seconds(3),
-    });
     const jobFailed = new sfn.Fail(this, "Job Failed", {
-      cause: "AWS Batch Job Failed",
-      error: "DescribeJob returned FAILED",
+      comment: "Job Failed",
     });
-    const receiveJob = new tasks.LambdaInvoke(this, "Receive Job", {
-      lambdaFunction: receiverLambda,
-      outputPath: "$.Payload",
+    const jobSucceed = new sfn.Succeed(this, "Job Succeed", {
+      comment: "Job Succeed",
     });
-
-    const processJob = new tasks.LambdaInvoke(this, "Submit Job", {
-      lambdaFunction: processorLambda,
-      outputPath: "$.Payload",
-    });
+    const checkStatus = new sfn.Choice(this, "Check Status?", {
+      inputPath: "$.recordResult",
+    })
+      .when(sfn.Condition.numberEquals("$.StatusCode", 500), jobFailed)
+      .when(sfn.Condition.numberEquals("$.StatusCode", 200), jobSucceed)
+      .otherwise(jobFailed);
 
     const wait30 = new sfn.Wait(this, "Wait 30 Seconds", {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    const getStatus = new tasks.LambdaInvoke(this, "Get Job Status", {
-      lambdaFunction: getStatusLambda,
-      // inputPath: "$.MessageBody.CorrelationId",
-      outputPath: "$.Payload",
-    });
-
-    const finalStatus = new tasks.LambdaInvoke(this, "Get Final Job Status", {
-      lambdaFunction: getStatusLambda,
-      // inputPath: "$.MessageBody.CorrelationId",
-      outputPath: "$.Payload",
+    const sfnTaskPayload = sfn.TaskInput.fromObject({
+      MyTaskToken: sfn.JsonPath.taskToken,
+      Record: sfn.TaskInput.fromJsonPathAt("$"),
     });
 
     const queueMessages = new tasks.SqsSendMessage(this, "SQS", {
       queue,
-      // outputPath: "$",
-      // inputPath: "$",
-      resultPath: "$.taskresult",
-      messageBody: sfn.TaskInput.fromJsonPathAt("$"),
-      // messageBody: sfn.TaskInput.fromJsonPathAt("$.MessageBody"),
-
-      // messageBody: sfn.TaskInput.fromObject({
-      //   "input.$": "$",
-      // }),
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      inputPath: "$",
+      messageBody: sfnTaskPayload,
+      resultSelector: { "Payload.$": "$" },
+      resultPath: "$.recordResult",
     });
-    getStatusLambda.addEventSource(
+
+    const notifyStatus = new tasks.LambdaInvoke(this, "Notify Status", {
+      lambdaFunction: notifyStatusLambda,
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      payload: sfn.TaskInput.fromObject({
+        token: sfn.JsonPath.taskToken,
+        input: sfn.JsonPath.stringAt("$"),
+      }),
+    });
+
+    notifyStatusLambda.addEventSource(
       new SqsEventSource(queue, {
-        batchSize: 10,
+        batchSize: 2,
+        maxBatchingWindow: cdk.Duration.seconds(10),
       })
     );
 
     const definition = new sfn.Pass(this, "PassTask")
       .next(queueMessages)
-      // .next(wait30)
-      .next(getStatus)
-      .next(receiveJob)
-      .next(processJob)
-      .next(
-        new sfn.Choice(this, "Job Complete?")
-          .when(sfn.Condition.stringEquals("$.status", "FAILED"), jobFailed)
-          .when(
-            sfn.Condition.stringEquals("$.status", "SUCCEEDED"),
-            finalStatus
-          )
-          .otherwise(wait30)
-      );
-    const stepFunctionsLogGroup = new logs.LogGroup(this, "MyLogGroup");
+      .next(notifyStatus)
+      .next(checkStatus);
+    // .next(
+    //   new sfn.Choice(this, "Job Complete?")
+    //     .when(sfn.Condition.stringEquals("$.status", "FAILED"), jobFailed)
+    //     .when(
+    //       sfn.Condition.stringEquals("$.status", "SUCCEEDED"),
+    //       finalStatus
+    //     )
+    //     .otherwise(wait30)
+    // );
+    const stepFunctionsLogGroup = new logs.LogGroup(
+      this,
+      "StepFunctionsLogGroup"
+    );
 
     const APIOrchestratorMachine = new sfn.StateMachine(this, "StateMachine", {
       definition,
@@ -127,6 +155,7 @@ export class StepStack extends cdk.Stack {
         destination: stepFunctionsLogGroup,
         level: sfn.LogLevel.ALL,
       },
+
       timeout: cdk.Duration.minutes(5),
     });
 
