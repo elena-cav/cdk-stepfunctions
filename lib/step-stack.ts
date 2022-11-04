@@ -90,11 +90,13 @@ export class StepStack extends cdk.Stack {
     const jobSucceed = new sfn.Succeed(this, "Job Succeed", {
       comment: "Job Succeed",
     });
-    const checkStatus = new sfn.Choice(this, "Check Status?", {
-      inputPath: "$.recordResult",
-    })
-      .when(sfn.Condition.numberEquals("$.StatusCode", 500), jobFailed)
-      .when(sfn.Condition.numberEquals("$.StatusCode", 200), jobSucceed)
+    const checkStatus = new sfn.Choice(
+      this,
+      "Check Status?"
+      // , {inputPath: "$.recordResult",}
+    )
+      .when(sfn.Condition.numberEquals("$.Payload.statusCode", 500), jobFailed)
+      .when(sfn.Condition.numberEquals("$.statusCode", 200), jobSucceed)
       .otherwise(jobFailed);
 
     const wait30 = new sfn.Wait(this, "Wait 30 Seconds", {
@@ -102,13 +104,13 @@ export class StepStack extends cdk.Stack {
     });
 
     const sfnTaskPayload = sfn.TaskInput.fromObject({
-      MyTaskToken: sfn.JsonPath.taskToken,
+      // MyTaskToken: sfn.JsonPath.taskToken,
       Record: sfn.TaskInput.fromJsonPathAt("$"),
     });
 
     const queueMessages = new tasks.SqsSendMessage(this, "SQS", {
       queue,
-      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      // integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       inputPath: "$",
       messageBody: sfnTaskPayload,
       resultSelector: { "Payload.$": "$" },
@@ -134,16 +136,8 @@ export class StepStack extends cdk.Stack {
     const definition = new sfn.Pass(this, "PassTask")
       .next(queueMessages)
       .next(notifyStatus)
+
       .next(checkStatus);
-    // .next(
-    //   new sfn.Choice(this, "Job Complete?")
-    //     .when(sfn.Condition.stringEquals("$.status", "FAILED"), jobFailed)
-    //     .when(
-    //       sfn.Condition.stringEquals("$.status", "SUCCEEDED"),
-    //       finalStatus
-    //     )
-    //     .otherwise(wait30)
-    // );
     const stepFunctionsLogGroup = new logs.LogGroup(
       this,
       "StepFunctionsLogGroup"
@@ -156,7 +150,7 @@ export class StepStack extends cdk.Stack {
         level: sfn.LogLevel.ALL,
       },
 
-      timeout: cdk.Duration.minutes(5),
+      timeout: cdk.Duration.minutes(2),
     });
 
     const API = new apigw.RestApi(this, "step-apigw", {
