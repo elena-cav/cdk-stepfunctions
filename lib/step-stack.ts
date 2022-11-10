@@ -1,18 +1,27 @@
-import * as cdk from "aws-cdk-lib";
+import { Construct } from "constructs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import * as iam from "aws-cdk-lib/aws-iam";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
-import { Construct } from "constructs";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
+import {
+  Stack,
+  StackProps,
+  Duration,
+  RemovalPolicy,
+  CfnOutput,
+} from "aws-cdk-lib";
+import { aws_events as events } from "aws-cdk-lib";
 
-export class StepStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+export class StepStack extends Stack {
+  static eventBus: events.EventBus;
+
+  constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
     const stubAPI = new apigw.RestApi(this, "atg-stub-apigw", {
@@ -43,15 +52,15 @@ export class StepStack extends cdk.Stack {
     );
 
     const deadLetterQueue = new sqs.Queue(this, "dead-letter-queue", {
-      retentionPeriod: cdk.Duration.days(14),
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      retentionPeriod: Duration.days(14),
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const queue = new sqs.Queue(this, "receiver-queue", {
-      retentionPeriod: cdk.Duration.days(5),
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      deliveryDelay: cdk.Duration.seconds(3),
-      visibilityTimeout: cdk.Duration.minutes(100),
+      retentionPeriod: Duration.days(5),
+      removalPolicy: RemovalPolicy.DESTROY,
+      deliveryDelay: Duration.seconds(3),
+      visibilityTimeout: Duration.minutes(100),
       deadLetterQueue: {
         queue: deadLetterQueue,
         maxReceiveCount: 1,
@@ -64,7 +73,7 @@ export class StepStack extends cdk.Stack {
       {
         entry: "./lambdas/notify-status.ts",
         runtime: lambda.Runtime.NODEJS_12_X,
-        timeout: cdk.Duration.seconds(3),
+        timeout: Duration.seconds(3),
         environment: {
           ATG_ENDPOINT: stubAPI.url,
         },
@@ -89,18 +98,6 @@ export class StepStack extends cdk.Stack {
     });
     const jobSucceed = new sfn.Succeed(this, "Job Succeed", {
       comment: "Job Succeed",
-    });
-    const checkStatus = new sfn.Choice(
-      this,
-      "Check Status?"
-      // , {inputPath: "$.recordResult",}
-    )
-      .when(sfn.Condition.numberEquals("$.Payload.statusCode", 500), jobFailed)
-      .when(sfn.Condition.numberEquals("$.statusCode", 200), jobSucceed)
-      .otherwise(jobFailed);
-
-    const wait30 = new sfn.Wait(this, "Wait 30 Seconds", {
-      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
     const sfnTaskPayload = sfn.TaskInput.fromObject({
@@ -129,14 +126,56 @@ export class StepStack extends cdk.Stack {
     notifyStatusLambda.addEventSource(
       new SqsEventSource(queue, {
         batchSize: 2,
-        maxBatchingWindow: cdk.Duration.seconds(10),
+        maxBatchingWindow: Duration.seconds(10),
       })
     );
 
-    const definition = new sfn.Pass(this, "PassTask")
+    StepStack.eventBus = new events.EventBus(this, "EventBus", {
+      eventBusName: "NotifyBus",
+    });
+
+    StepStack.eventBus.archive("NotifyBusArchive", {
+      archiveName: "NotifyBusArchive",
+      description: "NotifyBus Archive",
+      eventPattern: {
+        account: [Stack.of(this).account],
+      },
+      retention: Duration.days(365),
+    });
+
+    // Output the name of the new bus.
+    new CfnOutput(this, "NotifyBus", {
+      value: StepStack.eventBus.eventBusName,
+    });
+
+    const eventBridgeTask = new tasks.EventBridgePutEvents(
+      this,
+      "Send an event to EventBridge",
+      {
+        entries: [
+          {
+            detail: sfn.TaskInput.fromObject({
+              input: sfn.JsonPath.stringAt("$"),
+            }),
+            eventBus: StepStack.eventBus,
+            detailType: "MessageFromStepFunctions",
+            source: "step.functions",
+          },
+        ],
+      }
+    );
+    const checkStatus = new sfn.Choice(
+      this,
+      "Check Status?"
+      // , {inputPath: "$.recordResult",}
+    )
+      // .when(sfn.Condition.numberEquals("$.statusCode", 500), jobFailed)
+      .when(sfn.Condition.numberEquals("$.statusCode", 200), eventBridgeTask)
+      .otherwise(jobFailed);
+
+    const definition = new sfn.Pass(this, "PassApiEvent")
       .next(queueMessages)
       .next(notifyStatus)
-
       .next(checkStatus);
     const stepFunctionsLogGroup = new logs.LogGroup(
       this,
@@ -150,7 +189,7 @@ export class StepStack extends cdk.Stack {
         level: sfn.LogLevel.ALL,
       },
 
-      timeout: cdk.Duration.minutes(2),
+      timeout: Duration.minutes(2),
     });
 
     const API = new apigw.RestApi(this, "step-apigw", {
