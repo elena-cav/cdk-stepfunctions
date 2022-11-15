@@ -7,6 +7,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
 import * as logs from "aws-cdk-lib/aws-logs";
+import { EventBridgeTypes } from "../lambdas/send-email";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
 import {
@@ -67,20 +68,16 @@ export class StepStack extends Stack {
       },
     });
 
-    const notifyStatusLambda = new NodejsFunction(
-      this,
-      "notify-status-lambda",
-      {
-        entry: "./lambdas/notify-status.ts",
-        runtime: lambda.Runtime.NODEJS_12_X,
-        timeout: Duration.seconds(3),
-        environment: {
-          ATG_ENDPOINT: stubAPI.url,
-        },
-      }
-    );
+    const postEventLambda = new NodejsFunction(this, "send-event-lambda", {
+      entry: "./lambdas/send-event.ts",
+      runtime: lambda.Runtime.NODEJS_12_X,
+      timeout: Duration.seconds(3),
+      environment: {
+        ATG_ENDPOINT: stubAPI.url,
+      },
+    });
 
-    notifyStatusLambda.addToRolePolicy(
+    postEventLambda.addToRolePolicy(
       new PolicyStatement({
         actions: ["states:SendTaskSuccess", "states:SendTaskFailure"],
         resources: ["*"],
@@ -114,16 +111,16 @@ export class StepStack extends Stack {
       resultPath: "$.recordResult",
     });
 
-    const notifyStatus = new tasks.LambdaInvoke(this, "Notify Status", {
-      lambdaFunction: notifyStatusLambda,
-      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+    const postEvent = new tasks.LambdaInvoke(this, "Post Event", {
+      lambdaFunction: postEventLambda,
+      // integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       payload: sfn.TaskInput.fromObject({
-        token: sfn.JsonPath.taskToken,
+        // token: sfn.JsonPath.taskToken,
         input: sfn.JsonPath.stringAt("$"),
       }),
     });
 
-    notifyStatusLambda.addEventSource(
+    postEventLambda.addEventSource(
       new SqsEventSource(queue, {
         batchSize: 2,
         maxBatchingWindow: Duration.seconds(10),
@@ -134,14 +131,14 @@ export class StepStack extends Stack {
       eventBusName: "NotifyBus",
     });
 
-    StepStack.eventBus.archive("NotifyBusArchive", {
-      archiveName: "NotifyBusArchive",
-      description: "NotifyBus Archive",
-      eventPattern: {
-        account: [Stack.of(this).account],
-      },
-      retention: Duration.days(365),
-    });
+    // StepStack.eventBus.archive("NotifyBusArchive", {
+    //   archiveName: "NotifyBusArchive",
+    //   description: "NotifyBus Archive",
+    //   eventPattern: {
+    //     account: [Stack.of(this).account],
+    //   },
+    //   retention: Duration.days(365),
+    // });
 
     // Output the name of the new bus.
     new CfnOutput(this, "NotifyBus", {
@@ -158,7 +155,7 @@ export class StepStack extends Stack {
               input: sfn.JsonPath.stringAt("$"),
             }),
             eventBus: StepStack.eventBus,
-            detailType: "MessageFromStepFunctions",
+            detailType: EventBridgeTypes.StartEmailSender,
             source: "step.functions",
           },
         ],
@@ -170,12 +167,12 @@ export class StepStack extends Stack {
       // , {inputPath: "$.recordResult",}
     )
       // .when(sfn.Condition.numberEquals("$.statusCode", 500), jobFailed)
-      .when(sfn.Condition.numberEquals("$.statusCode", 200), eventBridgeTask)
+      .when(sfn.Condition.numberEquals("$.StatusCode", 200), eventBridgeTask)
       .otherwise(jobFailed);
 
     const definition = new sfn.Pass(this, "PassApiEvent")
       .next(queueMessages)
-      .next(notifyStatus)
+      .next(postEvent)
       .next(checkStatus);
     const stepFunctionsLogGroup = new logs.LogGroup(
       this,
