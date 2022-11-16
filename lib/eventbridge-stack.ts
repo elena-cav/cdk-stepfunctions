@@ -22,16 +22,11 @@ export class CdkEventbridgeStepfunctionStack extends Stack {
   ) {
     super(scope, id, props);
 
-    // Create an EventBus to receive and send events.
-
-    // Define the wait task.
-    // Because we're subscribing to an EventBridge event, the "at" field
-    // is under the detail.
     const waitTask = new sfn.Wait(this, "waitUntil", {
       time: sfn.WaitTime.timestampPath("$.time"),
     });
     const eventBridgeLogs = new logs.LogGroup(this, "NotificationStackLogs");
-    // Define the sendReminder task.
+
     const sendEmailLambda = new lambdaNode.NodejsFunction(this, "send-email", {
       runtime: lambda.Runtime.NODEJS_12_X,
       handler: "handler",
@@ -42,26 +37,40 @@ export class CdkEventbridgeStepfunctionStack extends Stack {
         EVENT_BUS: props.eventBus.eventBusName,
       },
     });
-    // Grant permission to send to the bus.
     props.eventBus.grantPutEventsTo(sendEmailLambda);
-    // Set up the Lambda function to be a task.
-    const sendEmailTask = new tasks.LambdaInvoke(this, "sendReminder", {
+
+    const sendEmailTask = new tasks.LambdaInvoke(this, "sendNotification", {
       lambdaFunction: sendEmailLambda,
-      outputPath: "$.Payload", // Return the output from the Lambda function.
+      outputPath: "$.Payload",
     });
 
-    // Configure a delay for the sendReminderTask.
-    const reminderMachineDefinition = waitTask.next(sendEmailTask);
-
-    // Construct the state machine.
-    const reminderMachine = new sfn.StateMachine(this, "EventBridgeMachine", {
-      definition: reminderMachineDefinition,
-      timeout: Duration.days(90),
-      logs: {
-        destination: eventBridgeLogs,
-        level: sfn.LogLevel.ALL,
-      },
+    const jobFailed = new sfn.Fail(this, "Job Failed", {
+      comment: "Job Failed",
     });
+
+    const jobSucceeded = new sfn.Succeed(this, "Job Succeeded", {
+      comment: "Job Succeeded",
+    });
+    const checkStatus = new sfn.Choice(this, "Check Status?")
+      .when(sfn.Condition.numberEquals("$.StatusCode", 200), jobSucceeded)
+      .otherwise(jobFailed);
+
+    const notificationMachineDefinition = waitTask
+      .next(sendEmailTask)
+      .next(checkStatus);
+
+    const notificationMachine = new sfn.StateMachine(
+      this,
+      "NotificationMachine",
+      {
+        definition: notificationMachineDefinition,
+        timeout: Duration.days(90),
+        logs: {
+          destination: eventBridgeLogs,
+          level: sfn.LogLevel.ALL,
+        },
+      }
+    );
     sendEmailLambda.addToRolePolicy(
       new PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
@@ -69,13 +78,12 @@ export class CdkEventbridgeStepfunctionStack extends Stack {
         effect: Effect.ALLOW,
       })
     );
-    // Configure EventBridge to start the reminder machine when a remind event is received.
-    const reminderMachineTarget = new eventsTarget.SfnStateMachine(
-      reminderMachine
+    const notificationMachineTarget = new eventsTarget.SfnStateMachine(
+      notificationMachine
     );
     new events.Rule(this, "startEmailSender", {
       eventBus: props.eventBus,
-      targets: [reminderMachineTarget],
+      targets: [notificationMachineTarget],
       eventPattern: {
         detailType: [EventBridgeTypes.StartEmailSender],
       },

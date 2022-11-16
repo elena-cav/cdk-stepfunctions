@@ -85,37 +85,23 @@ export class StepStack extends Stack {
       })
     );
 
-    // const jobFailed = new sfn.Fail(this, "Job Failed", {
-    //   cause: "AWS Batch Job Failed",
-    //   error: "DescribeJob returned FAILED",
-    // });
-
     const jobFailed = new sfn.Fail(this, "Job Failed", {
       comment: "Job Failed",
-    });
-    const jobSucceed = new sfn.Succeed(this, "Job Succeed", {
-      comment: "Job Succeed",
-    });
-
-    const sfnTaskPayload = sfn.TaskInput.fromObject({
-      // MyTaskToken: sfn.JsonPath.taskToken,
-      Record: sfn.TaskInput.fromJsonPathAt("$"),
     });
 
     const queueMessages = new tasks.SqsSendMessage(this, "SQS", {
       queue,
-      // integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       inputPath: "$",
-      messageBody: sfnTaskPayload,
+      messageBody: sfn.TaskInput.fromObject({
+        Record: sfn.TaskInput.fromJsonPathAt("$"),
+      }),
       resultSelector: { "Payload.$": "$" },
       resultPath: "$.recordResult",
     });
 
     const postEvent = new tasks.LambdaInvoke(this, "Post Event", {
       lambdaFunction: postEventLambda,
-      // integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       payload: sfn.TaskInput.fromObject({
-        // token: sfn.JsonPath.taskToken,
         input: sfn.JsonPath.stringAt("$"),
       }),
     });
@@ -131,23 +117,13 @@ export class StepStack extends Stack {
       eventBusName: "NotifyBus",
     });
 
-    // StepStack.eventBus.archive("NotifyBusArchive", {
-    //   archiveName: "NotifyBusArchive",
-    //   description: "NotifyBus Archive",
-    //   eventPattern: {
-    //     account: [Stack.of(this).account],
-    //   },
-    //   retention: Duration.days(365),
-    // });
-
-    // Output the name of the new bus.
     new CfnOutput(this, "NotifyBus", {
       value: StepStack.eventBus.eventBusName,
     });
 
     const eventBridgeTask = new tasks.EventBridgePutEvents(
       this,
-      "Send an event to EventBridge",
+      "Send to EventBridge",
       {
         entries: [
           {
@@ -161,12 +137,7 @@ export class StepStack extends Stack {
         ],
       }
     );
-    const checkStatus = new sfn.Choice(
-      this,
-      "Check Status?"
-      // , {inputPath: "$.recordResult",}
-    )
-      // .when(sfn.Condition.numberEquals("$.statusCode", 500), jobFailed)
+    const checkStatus = new sfn.Choice(this, "Check Status?")
       .when(sfn.Condition.numberEquals("$.StatusCode", 200), eventBridgeTask)
       .otherwise(jobFailed);
 
@@ -176,18 +147,22 @@ export class StepStack extends Stack {
       .next(checkStatus);
     const stepFunctionsLogGroup = new logs.LogGroup(
       this,
-      "StepFunctionsLogGroup"
+      "ProductProcessorLogGroup"
     );
 
-    const APIOrchestratorMachine = new sfn.StateMachine(this, "StateMachine", {
-      definition,
-      logs: {
-        destination: stepFunctionsLogGroup,
-        level: sfn.LogLevel.ALL,
-      },
+    const APIOrchestratorMachine = new sfn.StateMachine(
+      this,
+      "ProductProcessorMachine",
+      {
+        definition,
+        logs: {
+          destination: stepFunctionsLogGroup,
+          level: sfn.LogLevel.ALL,
+        },
 
-      timeout: Duration.minutes(2),
-    });
+        timeout: Duration.minutes(2),
+      }
+    );
 
     const API = new apigw.RestApi(this, "step-apigw", {
       defaultCorsPreflightOptions: {
