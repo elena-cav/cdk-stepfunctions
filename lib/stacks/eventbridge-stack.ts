@@ -7,7 +7,7 @@ import { Stack, StackProps, Duration } from "aws-cdk-lib";
 import { aws_lambda_nodejs as lambdaNode } from "aws-cdk-lib";
 import { aws_events as events } from "aws-cdk-lib";
 import { aws_events_targets as eventsTarget } from "aws-cdk-lib";
-import { EventBridgeTypes } from "../lambdas/send-email";
+import { EventBridgeTypes } from "../../lambdas/send-email";
 import * as logs from "aws-cdk-lib/aws-logs";
 
 interface CdkEventbridgeStepfunctionStackProps extends StackProps {
