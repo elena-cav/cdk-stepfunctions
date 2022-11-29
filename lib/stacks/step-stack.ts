@@ -1,4 +1,4 @@
-import { nestedSqsStack } from "../nested/sqs-construct";
+import { nestedSqsStack } from "../nested/sqs-nested-stack";
 import {
   nestedApiStack,
   nestedStubApisStack,
@@ -20,7 +20,6 @@ import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { EventBridgeTypes } from "../../lambdas/send-email";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
-import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
 import { Stack, StackProps, Duration, CfnOutput } from "aws-cdk-lib";
 import { aws_events as events } from "aws-cdk-lib";
 
@@ -40,14 +39,6 @@ export class StepStack extends Stack {
         ATG_ENDPOINT: stubAPI.url,
       },
     });
-
-    postEventLambda.addToRolePolicy(
-      new PolicyStatement({
-        actions: ["states:SendTaskSuccess", "states:SendTaskFailure"],
-        resources: ["*"],
-        effect: Effect.ALLOW,
-      })
-    );
 
     const postEvent = new tasks.LambdaInvoke(this, "Post Event", {
       lambdaFunction: postEventLambda,
@@ -97,7 +88,10 @@ export class StepStack extends Stack {
       .next(postEvent)
       .next(
         new Choice(this, "Check Status?")
-          .when(Condition.numberEquals("$.StatusCode", 200), eventBridgeTask)
+          .when(
+            Condition.numberEquals("$.Payload.statusCode", 200),
+            eventBridgeTask
+          )
           .otherwise(jobFailed)
       );
     const stepFunctionsLogGroup = new LogGroup(

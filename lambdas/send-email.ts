@@ -22,7 +22,7 @@ export interface Event {
 const sesClient = new SESClient({ region: "eu-west-1" });
 
 const sendEmail = async (teamEmail: string, insuranceProductId: string) => {
-  const response = await sesClient.send(
+  await sesClient.send(
     new SendEmailCommand({
       Destination: {
         ToAddresses: [teamEmail],
