@@ -39,6 +39,7 @@ export class StepStack extends Stack {
         ATG_ENDPOINT: stubAPI.url,
       },
     });
+    const passEventApi = new Pass(this, "PassApiEvent");
 
     const postEvent = new tasks.LambdaInvoke(this, "Post Event", {
       lambdaFunction: postEventLambda,
@@ -83,7 +84,7 @@ export class StepStack extends Stack {
       comment: "Job Failed",
     });
 
-    const definition = new Pass(this, "PassApiEvent")
+    const definition = passEventApi
       .next(queueMessages)
       .next(postEvent)
       .next(
